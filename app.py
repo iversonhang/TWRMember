@@ -28,6 +28,8 @@ def run_query(query, params=None, fetch=False):
         conn.commit()
     except Exception as e:
         st.error(f"資料庫錯誤: {e}")
+        if fetch:
+            return pd.DataFrame() # 防呆：發生錯誤時回傳空表格，避免網頁崩潰
     finally:
         cursor.close()
         conn.close()
