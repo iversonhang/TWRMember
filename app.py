@@ -97,10 +97,14 @@ def get_next_twr_code():
     return f"TWR{max_num + 1:05d}"
 
 # ==========================================
-# 3. 側邊欄選單
+# 3. 側邊欄導覽與全域管理員登入
 # ==========================================
 st.sidebar.title("🏉 欖球會系統")
-menu = st.sidebar.radio("選擇功能", ["📝 報名試堂 (公眾)", "👕 買隊衣 (會員購物車)", "🛠️️ 管理員後台 (Admin)"])
+menu = st.sidebar.radio("選擇功能", ["📝 報名試堂 (公眾)", "👕 買隊衣 (會員購物車)", "🛠 管理員後台 (Admin)"])
+
+st.sidebar.divider()
+st.sidebar.subheader("🔒 管理員登入")
+admin_password = st.sidebar.text_input("輸入 Admin 密碼", type="password")
 
 # ==========================================
 # 4. 功能模組：報名試堂
@@ -128,7 +132,7 @@ if menu == "📝 報名試堂 (公眾)":
                 st.warning("⚠️ 請填寫姓名與電話。")
 
 # ==========================================
-# 5. 功能模組：買隊衣 (多品項購物車)
+# 5. 功能模組：買隊衣 (會員購物車)
 # ==========================================
 elif menu == "👕 買隊衣 (會員購物車)":
     st.title("購買隊衣 (購物車)")
@@ -142,7 +146,6 @@ elif menu == "👕 買隊衣 (會員購物車)":
         if 'cart' not in st.session_state:
             st.session_state.cart = []
             
-        # 步驟一：驗證會員身分
         st.subheader("1. 確認會員身分")
         search_input = st.text_input("請輸入會員編號 或 登記電話")
         
@@ -162,7 +165,6 @@ elif menu == "👕 買隊衣 (會員購物車)":
         
         st.divider()
         
-        # 步驟二：加入購物車
         st.subheader("2. 選擇商品並加入購物車")
         with st.form("add_to_cart_form"):
             prod_name = st.selectbox("選擇商品", df_products['item_name'].tolist())
@@ -177,7 +179,6 @@ elif menu == "👕 買隊衣 (會員購物車)":
                 st.session_state.cart.append({"item": prod_name, "size": chosen_size, "price": price})
                 st.success(f"已加入: {prod_name} (尺寸: {chosen_size})")
         
-        # 步驟三：檢視購物車與結帳
         if st.session_state.cart:
             st.divider()
             st.subheader("3. 目前購物車明細")
@@ -195,7 +196,6 @@ elif menu == "👕 買隊衣 (會員購物車)":
             with col_c2:
                 if st.button("✅ 確認送出訂單"):
                     if selected_member_code:
-                        # 1. 寫入 orders 主表
                         conn = get_connection()
                         cur = conn.cursor()
                         try:
@@ -205,14 +205,13 @@ elif menu == "👕 買隊衣 (會員購物車)":
                             )
                             new_order_id = cur.fetchone()[0]
                             
-                            # 2. 寫入 order_items 子表
                             for item in st.session_state.cart:
                                 cur.execute(
                                     "INSERT INTO order_items (order_id, item_name, size, price) VALUES (%s, %s, %s, %s)",
                                     (new_order_id, item['item'], item['size'], item['price'])
                                 )
                             conn.commit()
-                            st.success(f"🎉 訂單已成功建立！訂單編號: #{new_order_id}，總金額: ${total_sum:.2f}。請聯絡教練付款。")
+                            st.success(f"🎉 訂單已成功建立！訂單編號: #{new_order_id}，總金額: ${total_sum:.2f}。")
                             st.session_state.cart = []
                             time.sleep(2)
                             st.rerun()
@@ -228,10 +227,8 @@ elif menu == "👕 買隊衣 (會員購物車)":
 # ==========================================
 # 6. 功能模組：管理員後台
 # ==========================================
-elif menu == "🛠️ 管理員後台 (Admin)":
+elif menu == "🛠 管理員後台 (Admin)":
     st.title("系統管理後台")
-    
-    admin_password = st.sidebar.text_input("輸入 Admin 密碼", type="password")
     
     if admin_password == "admin123":
         tab1, tab2, tab3, tab4 = st.tabs(["🔍 會員管理", "👕 隊衣商品設定", "📈 試堂名單", "📦 訂單與品項領取管理"])
@@ -251,7 +248,7 @@ elif menu == "🛠️ 管理員後台 (Admin)":
                     
                     with st.form("update_member"):
                         st.write(f"正在編輯: **{t_row['name']}**")
-                        new_status = st.selectbox("更改狀態", ["Trial", "Active", "Expired"], index=["Trial", "Active", "Expired"].index(t_row['status']))
+                        new_status = st.selectbox("更改狀態", ["Trial", "Active", "Expired"], index=["Trial", "Active", "Expired"].index(t_row['status']) if t_row['status'] in ["Trial", "Active", "Expired"] else 0)
                         new_code = st.text_input("會員編號", value=t_row['member_code'])
                         if st.form_submit_button("💾 儲存"):
                             run_query("UPDATE members SET status = %s, member_code = %s WHERE id = %s", (new_status, new_code, int(t_row['id'])))
@@ -290,11 +287,9 @@ elif menu == "🛠️ 管理員後台 (Admin)":
             if not df_t.empty:
                 st.dataframe(df_t, hide_index=True)
 
-        # --- Tab 4: 訂單與品項領取管理 (核心更新) ---
+        # --- Tab 4: 訂單與品項領取管理 ---
         with tab4:
             st.subheader("📦 訂單總覽與個別商品領取勾選")
-            
-            # 抓取所有主訂單
             df_orders = run_query("""
                 SELECT o.id, o.member_code, m.name AS member_name, o.total_amount, o.status, o.order_date 
                 FROM orders o 
@@ -306,14 +301,10 @@ elif menu == "🛠️ 管理員後台 (Admin)":
                 for _, ord_row in df_orders.iterrows():
                     order_id = ord_row['id']
                     with st.expander(f"🛒 訂單 #{order_id} | 會員: {ord_row['member_name']} ({ord_row['member_code']}) | 金額: ${ord_row['total_amount']} | 付款: {ord_row['status']} | 日期: {ord_row['order_date']}"):
-                        
-                        # 顯示這張訂單底下的所有商品項目
                         df_items = run_query("SELECT id, item_name, size, price, pickup_status FROM order_items WHERE order_id = %s", (int(order_id),), fetch=True)
                         
                         if not df_items.empty:
                             st.write("**📦 訂單商品明細與領取狀態：**")
-                            
-                            # 讓管理員可以針對該訂單內的每個商品進行個別勾選更新
                             for _, item_row in df_items.iterrows():
                                 item_id = item_row['id']
                                 current_pickup = item_row['pickup_status']
@@ -321,7 +312,6 @@ elif menu == "🛠️ 管理員後台 (Admin)":
                                 c1, c2, c3 = st.columns([3, 2, 2])
                                 c1.text(f"• {item_row['item_name']} (尺寸: {item_row['size']}) - ${item_row['price']}")
                                 
-                                # 下拉選單切換該單一商品的領取狀態
                                 new_item_pickup = c2.selectbox(
                                     "狀態", 
                                     ["Uncollected", "Collected"], 
@@ -335,8 +325,6 @@ elif menu == "🛠️ 管理員後台 (Admin)":
                                     st.rerun()
                         
                         st.divider()
-                        
-                        # 管理整筆訂單的付款狀態
                         with st.form(f"order_manage_{order_id}"):
                             st.write("💳 管理整筆訂單付款狀態")
                             p_stat = st.selectbox("付款狀態", ["Pending", "Paid", "Cancelled"], index=["Pending", "Paid", "Cancelled"].index(ord_row['status']) if ord_row['status'] in ["Pending", "Paid", "Cancelled"] else 0)
@@ -347,4 +335,4 @@ elif menu == "🛠️ 管理員後台 (Admin)":
             else:
                 st.info("目前尚無任何訂單紀錄。")
     else:
-        st.info("請於左側欄輸入管理員密碼以解鎖後台。")
+        st.warning("⚠️ 請在左側欄輸入正確的管理員密碼以解鎖後台 (預設密碼: admin123)。")
