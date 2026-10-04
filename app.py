@@ -233,7 +233,7 @@ elif menu == "🛠 管理員後台 (Admin)":
     if admin_password == "admin123":
         tab1, tab2, tab3, tab4 = st.tabs(["🔍 會員管理", "👕 隊衣商品設定", "📈 試堂名單", "📦 訂單與品項領取管理"])
         
-        # --- Tab 1: 會員管理 ---
+        # --- Tab 1: 會員管理 (支援取消品項與自動退款計算) ---
         with tab1:
             st.subheader("搜尋與管理")
             search_query = st.text_input("輸入編號、姓名或電話搜尋:")
@@ -258,19 +258,68 @@ elif menu == "🛠 管理員後台 (Admin)":
                             st.rerun()
                             
                     st.divider()
-                    st.subheader(f"📦 該會員的歷史訂單紀錄 ({sel_code})")
+                    st.subheader(f"📦 該會員的歷史訂單與退款管理 ({sel_code})")
                     
                     df_member_orders = run_query("""
-                        SELECT o.id AS order_id, o.order_date, o.total_amount, o.status AS pay_status,
-                               i.item_name, i.size, i.price, i.pickup_status
-                        FROM orders o
-                        LEFT JOIN order_items i ON o.id = i.order_id
-                        WHERE o.member_code = %s
-                        ORDER BY o.order_date DESC
+                        SELECT id AS order_id, order_date, total_amount, status AS pay_status
+                        FROM orders
+                        WHERE member_code = %s
+                        ORDER BY order_date DESC
                     """, (sel_code,), fetch=True)
                     
                     if not df_member_orders.empty:
-                        st.dataframe(df_member_orders, hide_index=True)
+                        for _, ord_r in df_member_orders.iterrows():
+                            o_id = ord_r['order_id']
+                            curr_pay_status = ord_r['pay_status']
+                            curr_total = float(ord_r['total_amount'])
+                            
+                            with st.expander(f"🛒 訂單 ID #{o_id} | 日期: {ord_r['order_date']} | 金額: ${curr_total} | 付款狀態: {curr_pay_status}"):
+                                df_itms = run_query("SELECT id, item_name, size, price, pickup_status FROM order_items WHERE order_id = %s", (int(o_id),), fetch=True)
+                                
+                                if not df_itms.empty:
+                                    for _, itm in df_itms.iterrows():
+                                        i_id = itm['id']
+                                        i_price = float(itm['price'])
+                                        cur_p = itm['pickup_status']
+                                        
+                                        c_col1, c_col2, c_col3, c_col4 = st.columns([3, 2, 2, 2])
+                                        c_col1.text(f"• {itm['item_name']} ({itm['size']}) - ${i_price}")
+                                        
+                                        new_p = c_col2.selectbox("領取", ["Uncollected", "Collected"], index=["Uncollected", "Collected"].index(cur_p) if cur_p in ["Uncollected", "Collected"] else 0, key=f"m_pickup_{i_id}")
+                                        
+                                        if c_col3.button("更新", key=f"m_btn_up_{i_id}"):
+                                            run_query("UPDATE order_items SET pickup_status = %s WHERE id = %s", (new_p, int(i_id)))
+                                            st.success("狀態已更新！")
+                                            st.rerun()
+                                            
+                                        # 取消品項並自動處理退款
+                                        if c_col4.button("❌ 取消品項", key=f"m_btn_del_{i_id}"):
+                                            # 1. 刪除該品項
+                                            run_query("DELETE FROM order_items WHERE id = %s", (int(i_id),))
+                                            
+                                            # 2. 計算新總金額
+                                            remaining = run_query("SELECT SUM(price) FROM order_items WHERE order_id = %s", (int(o_id),), fetch=True)
+                                            new_total = float(remaining.iloc[0, 0]) if not remaining.empty and remaining.iloc[0, 0] is not None else 0.0
+                                            
+                                            # 3. 判斷退款邏輯：如果原本是 Paid，取消品項後標記為 Refunded 或更新金額
+                                            if curr_pay_status == "Paid":
+                                                refund_amount = i_price
+                                                if new_total > 0:
+                                                    run_query("UPDATE orders SET total_amount = %s, status = 'Partially Refunded' WHERE id = %s", (new_total, int(o_id)))
+                                                    st.warning(f"⚠️ 品項已取消。此訂單原為 Paid，請退還會員金額: **${refund_amount:.2f}** (訂單狀態已更新為 Partially Refunded)")
+                                                else:
+                                                    run_query("UPDATE orders SET total_amount = 0, status = 'Refunded' WHERE id = %s", (int(o_id),))
+                                                    st.warning(f"⚠️ 所有品項皆已取消。此訂單需全額退款: **${curr_total:.2f}** (訂單狀態已更新為 Refunded)")
+                                            else:
+                                                if new_total > 0:
+                                                    run_query("UPDATE orders SET total_amount = %s WHERE id = %s", (new_total, int(o_id)))
+                                                else:
+                                                    run_query("DELETE FROM orders WHERE id = %s", (int(o_id),))
+                                            
+                                            time.sleep(3)
+                                            st.rerun()
+                                else:
+                                    st.info("此訂單目前沒有任何品項。")
                     else:
                         st.info("此會員目前尚無任何購物訂單紀錄。")
                         
@@ -347,7 +396,7 @@ elif menu == "🛠 管理員後台 (Admin)":
                         st.divider()
                         with st.form(f"order_manage_{order_id}"):
                             st.write("💳 管理整筆訂單付款狀態")
-                            p_stat = st.selectbox("付款狀態", ["Pending", "Paid", "Cancelled"], index=["Pending", "Paid", "Cancelled"].index(ord_row['status']) if ord_row['status'] in ["Pending", "Paid", "Cancelled"] else 0)
+                            p_stat = st.selectbox("付款狀態", ["Pending", "Paid", "Refunded", "Partially Refunded", "Cancelled"], index=0)
                             if st.form_submit_button("更新付款狀態"):
                                 run_query("UPDATE orders SET status = %s WHERE id = %s", (p_stat, int(order_id)))
                                 st.success(f"訂單 #{order_id} 付款狀態更新成功！")
