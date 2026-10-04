@@ -50,14 +50,15 @@ def init_db():
         size VARCHAR(10),
         price NUMERIC(10, 2),
         status VARCHAR(20) DEFAULT 'Pending',
+        pickup_status VARCHAR(20) DEFAULT 'Uncollected',
         order_date DATE DEFAULT CURRENT_DATE
     );
     CREATE TABLE IF NOT EXISTS products (
         id SERIAL PRIMARY KEY,
         item_name VARCHAR(100) UNIQUE,
         price NUMERIC(10, 2),
-        sizes VARCHAR(100), -- 儲存格式如: XS, S, M, L, XL
-        is_visible BOOLEAN DEFAULT TRUE -- 是否公開顯示給會員下單
+        sizes VARCHAR(100),
+        is_visible BOOLEAN DEFAULT TRUE
     );
     """
     run_query(create_tables_sql)
@@ -145,17 +146,16 @@ if menu == "📝 報名試堂 (公眾)":
                 st.warning("⚠️ 請填寫姓名與電話。")
 
 # ==========================================
-# 5. 功能模組：買隊衣 (動態讀取管理員設定的商品)
+# 5. 功能模組：買隊衣
 # ==========================================
 elif menu == "👕 買隊衣 (會員)":
     st.title("購買隊衣")
     st.write("正式會員或試堂學員皆可使用編號或登記電話下單。")
     
-    # 抓取所有 is_visible = True 的商品
     df_products = run_query("SELECT * FROM products WHERE is_visible = TRUE", fetch=True)
     
     if df_products.empty:
-        st.warning("⚠️️ 目前沒有開放訂購的隊衣品項，請稍候再試。")
+        st.warning("⚠ 目前沒有開放訂購的隊衣品項，請稍候再試。")
     else:
         if 'found_members' not in st.session_state:
             st.session_state.found_members = pd.DataFrame()
@@ -196,16 +196,14 @@ elif menu == "👕 買隊衣 (會員)":
                 selected_member_str = st.selectbox("選擇要購買隊衣的學員", member_options)
                 selected_member_code = selected_member_str.split("(")[-1].replace(")", "")
                 
-                # 動態帶入資料庫中的商品選項
                 product_options = df_products['item_name'].tolist()
                 selected_product = st.selectbox("選擇商品", product_options)
                 
-                # 取得該商品的價格與尺寸設定
                 product_row = df_products[df_products['item_name'] == selected_product].iloc[0]
                 price = product_row['price']
                 available_sizes = [s.strip() for s in str(product_row['sizes']).split(',')]
                 
-                st.info(typ := f"💰 價格: ${price}")
+                st.info(f"💰 價格: ${price}")
                 
                 size = st.selectbox("選擇尺寸", available_sizes)
                 
@@ -319,11 +317,10 @@ elif menu == "🛠️ 管理員後台 (Admin)":
             if not df_all.empty:
                 st.dataframe(df_all, hide_index=True)
 
-        # --- Tab 2: 隊衣商品設定 (新增功能) ---
+        # --- Tab 2: 隊衣商品設定 ---
         with tab2:
             st.subheader("👕 管理隊衣品項與預先設定")
             
-            # 新增商品表單
             with st.form("add_product_form"):
                 st.write("➕ 新增或預先定義商品")
                 new_item_name = st.text_input("商品名稱 (例如: 2027 主場球衣)")
@@ -344,7 +341,7 @@ elif menu == "🛠️ 管理員後台 (Admin)":
                         except Exception as e:
                             st.error(f"新增失敗，商品名稱可能重複：{e}")
                     else:
-                        st.warning("⚠️️ 請填寫商品名稱與尺寸。")
+                        st.warning("⚠ 請填寫商品名稱與尺寸。")
             
             st.divider()
             st.subheader("📋 現有商品清單與狀態調整")
@@ -384,19 +381,59 @@ elif menu == "🛠️ 管理員後台 (Admin)":
             else:
                 st.write("目前沒有待處理的試堂名單。")
             
-        # --- Tab 4: 隊衣訂單 ---
+        # --- Tab 4: 隊衣訂單 (新增詳細商品明細與領取狀態追蹤) ---
         with tab4:
-            st.subheader("隊衣訂購紀錄")
-            df_orders = run_query("SELECT * FROM orders ORDER BY order_date DESC", fetch=True)
+            st.subheader("📦 隊衣訂購與領取狀態管理")
+            
+            # 透過 JOIN 查詢，直接把會員姓名 (members.name) 跟訂單結合，讓後台一眼看出是誰買的
+            orders_query = """
+                SELECT o.id, o.member_code, m.name AS member_name, o.item, o.size, o.price, o.status, o.pickup_status, o.order_date 
+                FROM orders o
+                LEFT JOIN members m ON o.member_code = m.member_code
+                ORDER BY o.order_date DESC
+            """
+            df_orders = run_query(orders_query, fetch=True)
+            
             if not df_orders.empty:
                 st.dataframe(df_orders, hide_index=True)
-            
-            with st.form("update_order"):
-                order_id = st.number_input("輸入訂單 ID (id) 以更新狀態", min_value=1, step=1)
-                order_status = st.selectbox("狀態", ["Pending", "Paid", "Delivered"])
-                if st.form_submit_button("更新訂單"):
-                    run_query("UPDATE orders SET status = %s WHERE id = %s", (order_status, int(order_id)))
-                    st.success("✅ 訂單更新成功！")
-                    st.rerun()
+                
+                st.divider()
+                with st.form("update_order_status"):
+                    st.write("✏️ 更新訂單付款狀態與領取狀態")
+                    
+                    # 讓管理員選擇要修改哪一筆訂單 ID
+                    order_ids = df_orders['id'].tolist()
+                    selected_order_id = st.selectbox("選擇要更新的訂單 ID (id)", order_ids)
+                    
+                    # 抓取該筆訂單目前的值作為預設選項
+                    target_order = df_orders[df_orders['id'] == selected_order_id].iloc[0]
+                    
+                    curr_pay_status = target_order['status']
+                    curr_pickup_status = target_order['pickup_status']
+                    
+                    pay_options = ["Pending", "Paid", "Cancelled"]
+                    new_pay_status = st.selectbox(
+                        "付款狀態 (Payment Status)", 
+                        pay_options, 
+                        index=pay_options.index(curr_pay_status) if curr_pay_status in pay_options else 0
+                    )
+                    
+                    pickup_options = ["Uncollected", "Collected"]
+                    new_pickup_status = st.selectbox(
+                        "領取狀態 (Pickup Status)", 
+                        pickup_options, 
+                        index=pickup_options.index(curr_pickup_status) if curr_pickup_status in pickup_options else 0
+                    )
+                    
+                    if st.form_submit_button("💾 儲存訂單狀態"):
+                        run_query(
+                            "UPDATE orders SET status = %s, pickup_status = %s WHERE id = %s",
+                            (new_pay_status, new_pickup_status, int(selected_order_id))
+                        )
+                        st.success(f"✅ 訂單 ID #{selected_order_id} 更新成功！")
+                        time.sleep(1)
+                        st.rerun()
+            else:
+                st.info("目前尚無任何隊衣訂單紀錄。")
     else:
         st.info("請於左側欄輸入管理員密碼以解鎖後台 (預設測試密碼: admin123)。")
