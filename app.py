@@ -99,33 +99,78 @@ if menu == "📝 報名試堂 (公眾)":
                 st.warning("⚠️ 請填寫姓名與電話。")
 
 # ==========================================
-# 4. 功能模組：買隊衣 (試堂或正式會員皆可使用編號購買)
+# 4. 功能模組：買隊衣 (支援電話號碼搜尋與家庭多成員選擇)
 # ==========================================
 elif menu == "👕 買隊衣 (會員)":
     st.title("購買隊衣")
-    st.write("正式會員或試堂學員皆可使用編號下單。")
+    st.write("正式會員或試堂學員皆可使用編號或登記電話下單。")
     
-    with st.form("order_form"):
-        member_code = st.text_input("請輸入你的專屬/會員編號")
-        item = st.selectbox("選擇商品", ["2026 主場球衣", "2026 作客球衣", "訓練短褲"])
-        size = st.selectbox("選擇尺寸", ["XS", "S", "M", "L", "XL"])
-        
-        submitted = st.form_submit_button("確認下單")
-        if submitted:
-            if member_code:
-                # 簡單驗證編號是否存在
-                check_member = run_query("SELECT id FROM members WHERE member_code = %s", (member_code,), fetch=True)
+    # 建立兩個 session state 來管理搜尋狀態
+    if 'found_members' not in st.session_state:
+        st.session_state.found_members = pd.DataFrame()
+    if 'search_term' not in st.session_state:
+        st.session_state.search_term = ""
+
+    # 第一步：搜尋會員
+    search_input = st.text_input("請輸入專屬編號 或 聯絡電話", value=st.session_state.search_term)
+    
+    col1, col2 = st.columns([1, 5])
+    with col1:
+        if st.button("搜尋"):
+            if search_input:
+                # 同時搜尋 member_code (完全符合) 或 phone (完全符合或包含)
+                search_sql = "SELECT id, member_code, name, phone, status FROM members WHERE member_code = %s OR phone = %s"
+                result = run_query(search_sql, (search_input, search_input), fetch=True)
                 
-                if not check_member.empty:
-                    run_query(
-                        "INSERT INTO orders (member_code, item, size) VALUES (%s, %s, %s)",
-                        (member_code, item, size)
-                    )
-                    st.success("✅ 訂單已收到！請聯絡教練付款。")
+                if not result.empty:
+                    st.session_state.found_members = result
+                    st.session_state.search_term = search_input
                 else:
-                    st.error("❌ 找不到此會員編號，請重新確認。")
+                    st.error("❌ 找不到符合此編號或電話的會員，請重新確認。")
+                    st.session_state.found_members = pd.DataFrame()
             else:
-                st.warning("⚠️ 請輸入編號。")
+                st.warning("⚠️ 請輸入搜尋資料。")
+    with col2:
+        if not st.session_state.found_members.empty:
+             st.success(f"✅ 找到 {len(st.session_state.found_members)} 位會員")
+
+    st.divider()
+
+    # 第二步：顯示訂購表單 (只有在找到會員後才顯示)
+    if not st.session_state.found_members.empty:
+        with st.form("order_form"):
+            st.subheader("填寫訂單")
+            
+            # 準備下拉選單的選項 (顯示 姓名 + 編號)
+            member_options = []
+            for index, row in st.session_state.found_members.iterrows():
+                member_options.append(f"{row['name']} ({row['member_code']})")
+            
+            # 如果有多個成員（例如同一個電話有多個小朋友），讓用戶選擇
+            selected_member_str = st.selectbox("選擇要購買隊衣的學員", member_options)
+            
+            # 從選擇的字串中提取 member_code
+            # 格式是 "Name (MEMBER_CODE)"，所以我們取括號內的內容
+            selected_member_code = selected_member_str.split("(")[-1].replace(")", "")
+            
+            item = st.selectbox("選擇商品", ["2026 主場球衣", "2026 作客球衣", "訓練短褲"])
+            size = st.selectbox("選擇尺寸", ["XS", "S", "M", "L", "XL"])
+            
+            submitted = st.form_submit_button("確認下單")
+            
+            if submitted:
+                # 寫入訂單，使用剛剛提取出來的確切 member_code
+                run_query(
+                    "INSERT INTO orders (member_code, item, size) VALUES (%s, %s, %s)",
+                    (selected_member_code, item, size)
+                )
+                st.success(f"✅ 訂單已收到！({selected_member_str}) 的 {item} ({size}) 訂購成功，請聯絡教練付款。")
+                
+                # 訂購完成後提供按鈕可以重新整理/清空畫面
+                if st.button("完成並返回"):
+                    st.session_state.found_members = pd.DataFrame()
+                    st.session_state.search_term = ""
+                    st.rerun()
 
 # ==========================================
 # 5. 功能模組：管理員後台
