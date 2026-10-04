@@ -46,12 +46,17 @@ def init_db():
     CREATE TABLE IF NOT EXISTS orders (
         id SERIAL PRIMARY KEY,
         member_code VARCHAR(50),
-        item VARCHAR(100),
+        total_amount NUMERIC(10, 2) DEFAULT 0.0,
+        status VARCHAR(20) DEFAULT 'Pending',
+        order_date DATE DEFAULT CURRENT_DATE
+    );
+    CREATE TABLE IF NOT EXISTS order_items (
+        id SERIAL PRIMARY KEY,
+        order_id INT,
+        item_name VARCHAR(100),
         size VARCHAR(10),
         price NUMERIC(10, 2),
-        status VARCHAR(20) DEFAULT 'Pending',
-        pickup_status VARCHAR(20) DEFAULT 'Uncollected',
-        order_date DATE DEFAULT CURRENT_DATE
+        pickup_status VARCHAR(20) DEFAULT 'Uncollected'
     );
     CREATE TABLE IF NOT EXISTS products (
         id SERIAL PRIMARY KEY,
@@ -71,53 +76,31 @@ init_db()
 def get_next_trial_code():
     query = "SELECT member_code FROM members WHERE member_code LIKE 'TRIAL-%'"
     df = run_query(query, fetch=True)
-    
     if df.empty:
         return "TRIAL-0001"
-    
-    existing_nums = []
-    for code in df['member_code']:
-        try:
-            num = int(code.split('-')[1])
-            existing_nums.append(num)
-        except:
-            pass
-            
+    existing_nums = [int(code.split('-')[1]) for code in df['member_code'] if '-' in code]
     existing_nums.sort()
-    
     target = 1
     for num in existing_nums:
         if num == target:
             target += 1
         elif num > target:
             break
-            
     return f"TRIAL-{target:04d}"
 
 def get_next_twr_code():
     query = "SELECT member_code FROM members WHERE member_code LIKE 'TWR%'"
     df = run_query(query, fetch=True)
-    
     if df.empty:
         return "TWR00001"
-    
-    max_num = 0
-    for code in df['member_code']:
-        try:
-            num = int(code.replace('TWR', ''))
-            if num > max_num:
-                max_num = num
-        except:
-            pass
-            
-    next_num = max_num + 1
-    return f"TWR{next_num:05d}"
+    max_num = max([int(code.replace('TWR', '')) for code in df['member_code'] if 'TWR' in code] + [0])
+    return f"TWR{max_num + 1:05d}"
 
 # ==========================================
 # 3. 側邊欄選單
 # ==========================================
 st.sidebar.title("🏉 欖球會系統")
-menu = st.sidebar.radio("選擇功能", ["📝 報名試堂 (公眾)", "👕 買隊衣 (會員)", "🛠️ 管理員後台 (Admin)"])
+menu = st.sidebar.radio("選擇功能", ["📝 報名試堂 (公眾)", "👕 買隊衣 (會員購物車)", "🛠️️ 管理員後台 (Admin)"])
 
 # ==========================================
 # 4. 功能模組：報名試堂
@@ -135,88 +118,112 @@ if menu == "📝 報名試堂 (公眾)":
         if submitted:
             if name and phone:
                 temp_code = get_next_trial_code()
-                
                 run_query(
                     "INSERT INTO members (member_code, name, phone, status, trial_date) VALUES (%s, %s, %s, 'Trial', %s)", 
                     (temp_code, name, phone, trial_date)
                 )
-                st.success("✅ 成功報名試堂！我們會盡快與您聯絡。")
-                st.info(f"📌 您的專屬編號為：**{temp_code}** (請記下此編號以便日後查詢或購買隊衣)")
+                st.success("✅ 成功報名試堂！")
+                st.info(f"📌 您的專屬編號為：**{temp_code}**")
             else:
                 st.warning("⚠️ 請填寫姓名與電話。")
 
 # ==========================================
-# 5. 功能模組：買隊衣
+# 5. 功能模組：買隊衣 (多品項購物車)
 # ==========================================
-elif menu == "👕 買隊衣 (會員)":
-    st.title("購買隊衣")
-    st.write("正式會員或試堂學員皆可使用編號或登記電話下單。")
+elif menu == "👕 買隊衣 (會員購物車)":
+    st.title("購買隊衣 (購物車)")
+    st.write("您可以同時選購多項商品，系統會自動加總總金額。")
     
     df_products = run_query("SELECT * FROM products WHERE is_visible = TRUE", fetch=True)
     
     if df_products.empty:
-        st.warning("⚠ 目前沒有開放訂購的隊衣品項，請稍候再試。")
+        st.warning("⚠ 目前沒有開放訂購的隊衣品項。")
     else:
-        if 'found_members' not in st.session_state:
-            st.session_state.found_members = pd.DataFrame()
-        if 'search_term' not in st.session_state:
-            st.session_state.search_term = ""
-
-        search_input = st.text_input("請輸入專屬編號 或 聯絡電話", value=st.session_state.search_term)
+        if 'cart' not in st.session_state:
+            st.session_state.cart = []
+            
+        # 步驟一：驗證會員身分
+        st.subheader("1. 確認會員身分")
+        search_input = st.text_input("請輸入會員編號 或 登記電話")
         
-        col1, col2 = st.columns([1, 5])
-        with col1:
-            if st.button("搜尋"):
-                if search_input:
-                    search_sql = "SELECT id, member_code, name, phone, status FROM members WHERE member_code = %s OR phone = %s"
-                    result = run_query(search_sql, (search_input, search_input), fetch=True)
-                    
-                    if not result.empty:
-                        st.session_state.found_members = result
-                        st.session_state.search_term = search_input
-                    else:
-                        st.error("❌ 找不到符合此編號或電話的會員，請重新確認。")
-                        st.session_state.found_members = pd.DataFrame()
+        selected_member_code = None
+        if search_input:
+            res_mem = run_query("SELECT member_code, name, phone FROM members WHERE member_code = %s OR phone = %s", (search_input, search_input), fetch=True)
+            if not res_mem.empty:
+                if len(res_mem) > 1:
+                    opts = [f"{r['name']} ({r['member_code']})" for _, r in res_mem.iterrows()]
+                    chosen = st.selectbox("此電話有多位成員，請選擇：", opts)
+                    selected_member_code = chosen.split("(")[-1].replace(")", "")
                 else:
-                    st.warning("⚠️ 請輸入搜尋資料。")
-        with col2:
-            if not st.session_state.found_members.empty:
-                 st.success(f"✅ 找到 {len(st.session_state.found_members)} 位會員")
-
+                    selected_member_code = res_mem.iloc[0]['member_code']
+                    st.success(f"✅ 已識別會員: {res_mem.iloc[0]['name']} ({selected_member_code})")
+            else:
+                st.error("❌ 找不到此編號或電話。")
+        
         st.divider()
-
-        if not st.session_state.found_members.empty:
-            with st.form("order_form"):
-                st.subheader("填寫訂單")
-                
-                member_options = []
-                for index, row in st.session_state.found_members.iterrows():
-                    member_options.append(f"{row['name']} ({row['member_code']})")
-                
-                selected_member_str = st.selectbox("選擇要購買隊衣的學員", member_options)
-                selected_member_code = selected_member_str.split("(")[-1].replace(")", "")
-                
-                product_options = df_products['item_name'].tolist()
-                selected_product = st.selectbox("選擇商品", product_options)
-                
-                product_row = df_products[df_products['item_name'] == selected_product].iloc[0]
-                price = product_row['price']
-                available_sizes = [s.strip() for s in str(product_row['sizes']).split(',')]
-                
-                st.info(f"💰 價格: ${price}")
-                
-                size = st.selectbox("選擇尺寸", available_sizes)
-                
-                submitted = st.form_submit_button("確認下單")
-                
-                if submitted:
-                    run_query(
-                        "INSERT INTO orders (member_code, item, size, price) VALUES (%s, %s, %s, %s)",
-                        (selected_member_code, selected_product, size, price)
-                    )
-                    st.success(f"✅ 訂單已收到！({selected_member_str}) 的 {selected_product} (尺寸: {size}, 價格: ${price}) 訂購成功，請聯絡教練付款。")
-                    st.session_state.found_members = pd.DataFrame()
-                    st.session_state.search_term = ""
+        
+        # 步驟二：加入購物車
+        st.subheader("2. 選擇商品並加入購物車")
+        with st.form("add_to_cart_form"):
+            prod_name = st.selectbox("選擇商品", df_products['item_name'].tolist())
+            p_row = df_products[df_products['item_name'] == prod_name].iloc[0]
+            sizes = [s.strip() for s in str(p_row['sizes']).split(',')]
+            price = float(p_row['price'])
+            
+            chosen_size = st.selectbox("選擇尺寸", sizes)
+            add_btn = st.form_submit_button("🛒 加入購物車")
+            
+            if add_btn:
+                st.session_state.cart.append({"item": prod_name, "size": chosen_size, "price": price})
+                st.success(f"已加入: {prod_name} (尺寸: {chosen_size})")
+        
+        # 步驟三：檢視購物車與結帳
+        if st.session_state.cart:
+            st.divider()
+            st.subheader("3. 目前購物車明細")
+            df_cart = pd.DataFrame(st.session_state.cart)
+            st.dataframe(df_cart, hide_index=True)
+            
+            total_sum = df_cart['price'].sum()
+            st.markdown(f"### 💰 總金額: **${total_sum:.2f}**")
+            
+            col_c1, col_c2 = st.columns(2)
+            with col_c1:
+                if st.button("🗑️ 清空購物車"):
+                    st.session_state.cart = []
+                    st.rerun()
+            with col_c2:
+                if st.button("✅ 確認送出訂單"):
+                    if selected_member_code:
+                        # 1. 寫入 orders 主表
+                        conn = get_connection()
+                        cur = conn.cursor()
+                        try:
+                            cur.execute(
+                                "INSERT INTO orders (member_code, total_amount) VALUES (%s, %s) RETURNING id",
+                                (selected_member_code, total_sum)
+                            )
+                            new_order_id = cur.fetchone()[0]
+                            
+                            # 2. 寫入 order_items 子表
+                            for item in st.session_state.cart:
+                                cur.execute(
+                                    "INSERT INTO order_items (order_id, item_name, size, price) VALUES (%s, %s, %s, %s)",
+                                    (new_order_id, item['item'], item['size'], item['price'])
+                                )
+                            conn.commit()
+                            st.success(f"🎉 訂單已成功建立！訂單編號: #{new_order_id}，總金額: ${total_sum:.2f}。請聯絡教練付款。")
+                            st.session_state.cart = []
+                            time.sleep(2)
+                            st.rerun()
+                        except Exception as e:
+                            conn.rollback()
+                            st.error(f"結帳失敗: {e}")
+                        finally:
+                            cur.close()
+                            conn.close()
+                    else:
+                        st.warning("⚠️ 請先在上方完成會員身分識別才能送出訂單。")
 
 # ==========================================
 # 6. 功能模組：管理員後台
@@ -227,213 +234,117 @@ elif menu == "🛠️ 管理員後台 (Admin)":
     admin_password = st.sidebar.text_input("輸入 Admin 密碼", type="password")
     
     if admin_password == "admin123":
-        tab1, tab2, tab3, tab4 = st.tabs(["🔍 會員管理", "👕 隊衣商品設定", "📈 試堂名單", "📦 隊衣訂單"])
+        tab1, tab2, tab3, tab4 = st.tabs(["🔍 會員管理", "👕 隊衣商品設定", "📈 試堂名單", "📦 訂單與品項領取管理"])
         
         # --- Tab 1: 會員管理 ---
         with tab1:
             st.subheader("搜尋與管理")
             search_query = st.text_input("輸入編號、姓名或電話搜尋:")
-            
             if search_query:
-                search_sql = "SELECT * FROM members WHERE member_code ILIKE %s OR name ILIKE %s OR phone = %s"
-                df_members = run_query(search_sql, (f"%{search_query}%", f"%{search_query}%", search_query), fetch=True)
-                
-                if not df_members.empty:
-                    st.success(f"🔍 找到 {len(df_members)} 筆符合的紀錄，請在下方選擇欲編輯的成員：")
-                    st.dataframe(df_members, hide_index=True)
-                    
-                    st.divider()
-                    
-                    options = []
-                    for _, r in df_members.iterrows():
-                        options.append(f"{r['name']} ({r['member_code']}) - 電話: {r['phone']}")
-                    
-                    selected_option = st.selectbox("🎯 選擇要編輯的成員", options)
-                    selected_code = selected_option.split("(")[-1].split(")")[0]
-                    
-                    target_row = df_members[df_members['member_code'] == selected_code].iloc[0]
-                    
-                    member_id = target_row['id']
-                    current_status = target_row['status']
-                    current_code = target_row['member_code']
-                    trial_date_val = target_row['trial_date']
-                    join_date_val = target_row['join_date']
+                df_m = run_query("SELECT * FROM members WHERE member_code ILIKE %s OR name ILIKE %s OR phone = %s", (f"%{search_query}%", f"%{search_query}%", search_query), fetch=True)
+                if not df_m.empty:
+                    st.dataframe(df_m, hide_index=True)
+                    opts = [f"{r['name']} ({r['member_code']})" for _, r in df_m.iterrows()]
+                    sel_opt = st.selectbox("🎯 選擇要編輯的成員", opts)
+                    sel_code = sel_opt.split("(")[-1].split(")")[0]
+                    t_row = df_m[df_m['member_code'] == sel_code].iloc[0]
                     
                     with st.form("update_member"):
-                        st.markdown(f"### ✏️ 正在編輯: **{target_row['name']}**")
-                        
-                        time_col1, time_col2 = st.columns(2)
-                        time_col1.info(f"📅 報名試堂日: {trial_date_val if pd.notna(trial_date_val) else '無紀錄'}")
-                        time_col2.success(f"🎉 正式入會日: {join_date_val if pd.notna(join_date_val) else '尚未入會'}")
-                        
-                        st.divider()
-                        
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            status_options = ["Trial", "Active", "Expired"]
-                            new_status = st.selectbox(
-                                "更改狀態 (繳費後轉為 Active)", 
-                                status_options, 
-                                index=status_options.index(current_status) if current_status in status_options else 0
-                            )
-                        
-                        with col2:
-                            suggested_code = current_code
-                            if new_status == "Active" and current_status == "Trial" and current_code.startswith("TRIAL"):
-                                suggested_code = get_next_twr_code()
-                                
-                            new_code = st.text_input("會員編號 (轉正式會員請設為 TWR 開頭)", value=suggested_code)
-                            
-                        if st.form_submit_button("💾 確認更新資料"):
-                            try:
-                                join_date_sql = ""
-                                if new_status == "Active" and current_status != "Active" and pd.isna(join_date_val):
-                                    join_date_sql = ", join_date = CURRENT_DATE"
-                                    
-                                update_sql = f"UPDATE members SET status = %s, member_code = %s {join_date_sql} WHERE id = %s"
-                                run_query(update_sql, (new_status, new_code, int(member_id)))
-                                
-                                if current_code != new_code:
-                                    run_query(
-                                        "UPDATE orders SET member_code = %s WHERE member_code = %s", 
-                                        (new_code, current_code)
-                                    )
-                                    
-                                st.success(f"✅ 會員 {target_row['name']} 資料更新成功！")
-                                if current_code != new_code:
-                                    st.info(f"🔄 編號已從 {current_code} 變更為 {new_code}，歷史訂單已自動同步。")
-                                
-                                time.sleep(1.5)
-                                st.rerun()
-                                
-                            except Exception as e:
-                                st.error(f"❌ 更新失敗：{e}")
+                        st.write(f"正在編輯: **{t_row['name']}**")
+                        new_status = st.selectbox("更改狀態", ["Trial", "Active", "Expired"], index=["Trial", "Active", "Expired"].index(t_row['status']))
+                        new_code = st.text_input("會員編號", value=t_row['member_code'])
+                        if st.form_submit_button("💾 儲存"):
+                            run_query("UPDATE members SET status = %s, member_code = %s WHERE id = %s", (new_status, new_code, int(t_row['id'])))
+                            if t_row['member_code'] != new_code:
+                                run_query("UPDATE orders SET member_code = %s WHERE member_code = %s", (new_code, t_row['member_code']))
+                            st.success("更新成功！")
+                            st.rerun()
                 else:
                     st.warning("找不到此人。")
-                    
-            st.divider()
-            st.write("📋 系統所有會員總表")
-            df_all = run_query("SELECT * FROM members ORDER BY id DESC", fetch=True)
-            if not df_all.empty:
-                st.dataframe(df_all, hide_index=True)
+            st.write("📋 所有會員總表")
+            df_all_m = run_query("SELECT * FROM members ORDER BY id DESC", fetch=True)
+            if not df_all_m.empty:
+                st.dataframe(df_all_m, hide_index=True)
 
-        # --- Tab 2: 隊衣商品設定 ---
+        # --- Tab 2: 商品設定 ---
         with tab2:
-            st.subheader("👕 管理隊衣品項與預先設定")
-            
-            with st.form("add_product_form"):
-                st.write("➕ 新增或預先定義商品")
-                new_item_name = st.text_input("商品名稱 (例如: 2027 主場球衣)")
-                new_price = st.number_input("價格 ($)", min_value=0.0, step=10.0)
-                new_sizes = st.text_input("可用尺寸 (請用逗號分隔，例如: XS, S, M, L, XL)")
-                new_is_visible = st.checkbox("是否立即上架讓會員可見/下單？", value=True)
-                
-                if st.form_submit_button("新增商品"):
-                    if new_item_name and new_sizes:
-                        try:
-                            run_query(
-                                "INSERT INTO products (item_name, price, sizes, is_visible) VALUES (%s, %s, %s, %s)",
-                                (new_item_name, new_price, new_sizes, new_is_visible)
-                            )
-                            st.success(f"✅ 成功新增商品: {new_item_name}")
-                            time.sleep(1)
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"新增失敗，商品名稱可能重複：{e}")
-                    else:
-                        st.warning("⚠ 請填寫商品名稱與尺寸。")
-            
+            st.subheader("👕 隊衣商品與庫存預先定義")
+            with st.form("add_prod"):
+                n_name = st.text_input("商品名稱")
+                n_price = st.number_input("價格", min_value=0.0)
+                n_sizes = st.text_input("尺寸 (逗號分隔)")
+                n_vis = st.checkbox("公開上架", value=True)
+                if st.form_submit_button("新增"):
+                    run_query("INSERT INTO products (item_name, price, sizes, is_visible) VALUES (%s, %s, %s, %s)", (n_name, n_price, n_sizes, n_vis))
+                    st.success("新增成功！")
+                    st.rerun()
             st.divider()
-            st.subheader("📋 現有商品清單與狀態調整")
-            df_products_all = run_query("SELECT * FROM products ORDER BY id DESC", fetch=True)
-            
-            if not df_products_all.empty:
-                st.dataframe(df_products_all, hide_index=True)
-                
-                with st.form("update_product_form"):
-                    st.write("✏️ 修改商品狀態 / 價格 / 尺寸")
-                    prod_options = df_products_all['item_name'].tolist()
-                    selected_prod = st.selectbox("選擇要修改的商品名稱", prod_options)
-                    
-                    target_prod = df_products_all[df_products_all['item_name'] == selected_prod].iloc[0]
-                    
-                    edit_price = st.number_input("修改價格", value=float(target_prod['price']), step=10.0)
-                    edit_sizes = st.text_input("修改尺寸", value=target_prod['sizes'])
-                    edit_visible = st.checkbox("公開上架供會員選購 (Visible)", value=bool(target_prod['is_visible']))
-                    
-                    if st.form_submit_button("更新商品資料"):
-                        run_query(
-                            "UPDATE products SET price = %s, sizes = %s, is_visible = %s WHERE item_name = %s",
-                            (edit_price, edit_sizes, edit_visible, selected_prod)
-                        )
-                        st.success(f"✅ 商品 {selected_prod} 更新成功！")
-                        time.sleep(1)
-                        st.rerun()
-            else:
-                st.info("目前尚無任何預先設定的商品。")
-            
+            df_p = run_query("SELECT * FROM products", fetch=True)
+            if not df_p.empty:
+                st.dataframe(df_p, hide_index=True)
+
         # --- Tab 3: 試堂名單 ---
         with tab3:
             st.subheader("即將到來的試堂")
-            df_trials = run_query("SELECT member_code, name, phone, trial_date FROM members WHERE status = 'Trial' ORDER BY trial_date ASC", fetch=True)
-            if not df_trials.empty:
-                st.dataframe(df_trials, hide_index=True)
-            else:
-                st.write("目前沒有待處理的試堂名單。")
-            
-        # --- Tab 4: 隊衣訂單 (新增詳細商品明細與領取狀態追蹤) ---
+            df_t = run_query("SELECT member_code, name, phone, trial_date FROM members WHERE status = 'Trial' ORDER BY trial_date ASC", fetch=True)
+            if not df_t.empty:
+                st.dataframe(df_t, hide_index=True)
+
+        # --- Tab 4: 訂單與品項領取管理 (核心更新) ---
         with tab4:
-            st.subheader("📦 隊衣訂購與領取狀態管理")
+            st.subheader("📦 訂單總覽與個別商品領取勾選")
             
-            # 透過 JOIN 查詢，直接把會員姓名 (members.name) 跟訂單結合，讓後台一眼看出是誰買的
-            orders_query = """
-                SELECT o.id, o.member_code, m.name AS member_name, o.item, o.size, o.price, o.status, o.pickup_status, o.order_date 
-                FROM orders o
-                LEFT JOIN members m ON o.member_code = m.member_code
+            # 抓取所有主訂單
+            df_orders = run_query("""
+                SELECT o.id, o.member_code, m.name AS member_name, o.total_amount, o.status, o.order_date 
+                FROM orders o 
+                LEFT JOIN members m ON o.member_code = m.member_code 
                 ORDER BY o.order_date DESC
-            """
-            df_orders = run_query(orders_query, fetch=True)
+            """, fetch=True)
             
             if not df_orders.empty:
-                st.dataframe(df_orders, hide_index=True)
-                
-                st.divider()
-                with st.form("update_order_status"):
-                    st.write("✏️ 更新訂單付款狀態與領取狀態")
-                    
-                    # 讓管理員選擇要修改哪一筆訂單 ID
-                    order_ids = df_orders['id'].tolist()
-                    selected_order_id = st.selectbox("選擇要更新的訂單 ID (id)", order_ids)
-                    
-                    # 抓取該筆訂單目前的值作為預設選項
-                    target_order = df_orders[df_orders['id'] == selected_order_id].iloc[0]
-                    
-                    curr_pay_status = target_order['status']
-                    curr_pickup_status = target_order['pickup_status']
-                    
-                    pay_options = ["Pending", "Paid", "Cancelled"]
-                    new_pay_status = st.selectbox(
-                        "付款狀態 (Payment Status)", 
-                        pay_options, 
-                        index=pay_options.index(curr_pay_status) if curr_pay_status in pay_options else 0
-                    )
-                    
-                    pickup_options = ["Uncollected", "Collected"]
-                    new_pickup_status = st.selectbox(
-                        "領取狀態 (Pickup Status)", 
-                        pickup_options, 
-                        index=pickup_options.index(curr_pickup_status) if curr_pickup_status in pickup_options else 0
-                    )
-                    
-                    if st.form_submit_button("💾 儲存訂單狀態"):
-                        run_query(
-                            "UPDATE orders SET status = %s, pickup_status = %s WHERE id = %s",
-                            (new_pay_status, new_pickup_status, int(selected_order_id))
-                        )
-                        st.success(f"✅ 訂單 ID #{selected_order_id} 更新成功！")
-                        time.sleep(1)
-                        st.rerun()
+                for _, ord_row in df_orders.iterrows():
+                    order_id = ord_row['id']
+                    with st.expander(f"🛒 訂單 #{order_id} | 會員: {ord_row['member_name']} ({ord_row['member_code']}) | 金額: ${ord_row['total_amount']} | 付款: {ord_row['status']} | 日期: {ord_row['order_date']}"):
+                        
+                        # 顯示這張訂單底下的所有商品項目
+                        df_items = run_query("SELECT id, item_name, size, price, pickup_status FROM order_items WHERE order_id = %s", (int(order_id),), fetch=True)
+                        
+                        if not df_items.empty:
+                            st.write("**📦 訂單商品明細與領取狀態：**")
+                            
+                            # 讓管理員可以針對該訂單內的每個商品進行個別勾選更新
+                            for _, item_row in df_items.iterrows():
+                                item_id = item_row['id']
+                                current_pickup = item_row['pickup_status']
+                                
+                                c1, c2, c3 = st.columns([3, 2, 2])
+                                c1.text(f"• {item_row['item_name']} (尺寸: {item_row['size']}) - ${item_row['price']}")
+                                
+                                # 下拉選單切換該單一商品的領取狀態
+                                new_item_pickup = c2.selectbox(
+                                    "狀態", 
+                                    ["Uncollected", "Collected"], 
+                                    index=["Uncollected", "Collected"].index(current_pickup) if current_pickup in ["Uncollected", "Collected"] else 0,
+                                    key=f"item_status_{item_id}"
+                                )
+                                
+                                if c3.button("更新品項", key=f"btn_item_{item_id}"):
+                                    run_query("UPDATE order_items SET pickup_status = %s WHERE id = %s", (new_item_pickup, int(item_id)))
+                                    st.success(f"品項 #{item_id} 狀態已更新！")
+                                    st.rerun()
+                        
+                        st.divider()
+                        
+                        # 管理整筆訂單的付款狀態
+                        with st.form(f"order_manage_{order_id}"):
+                            st.write("💳 管理整筆訂單付款狀態")
+                            p_stat = st.selectbox("付款狀態", ["Pending", "Paid", "Cancelled"], index=["Pending", "Paid", "Cancelled"].index(ord_row['status']) if ord_row['status'] in ["Pending", "Paid", "Cancelled"] else 0)
+                            if st.form_submit_button("更新付款狀態"):
+                                run_query("UPDATE orders SET status = %s WHERE id = %s", (p_stat, int(order_id)))
+                                st.success(f"訂單 #{order_id} 付款狀態更新成功！")
+                                st.rerun()
             else:
-                st.info("目前尚無任何隊衣訂單紀錄。")
+                st.info("目前尚無任何訂單紀錄。")
     else:
-        st.info("請於左側欄輸入管理員密碼以解鎖後台 (預設測試密碼: admin123)。")
+        st.info("請於左側欄輸入管理員密碼以解鎖後台。")
