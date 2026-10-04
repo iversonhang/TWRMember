@@ -185,7 +185,8 @@ elif menu == "👕 買隊衣 (會員購物車)":
             df_cart = pd.DataFrame(st.session_state.cart)
             st.dataframe(df_cart, hide_index=True)
             
-            total_sum = df_cart['price'].sum()
+            # 強制轉換總金額為標準 float，避免 np.float64 型態錯誤
+            total_sum = float(df_cart['price'].sum())
             st.markdown(f"### 💰 總金額: **${total_sum:.2f}**")
             
             col_c1, col_c2 = st.columns(2)
@@ -199,16 +200,18 @@ elif menu == "👕 買隊衣 (會員購物車)":
                         conn = get_connection()
                         cur = conn.cursor()
                         try:
+                            # 寫入 orders 主表 (強制轉為標準 float)
                             cur.execute(
                                 "INSERT INTO orders (member_code, total_amount) VALUES (%s, %s) RETURNING id",
                                 (selected_member_code, total_sum)
                             )
                             new_order_id = cur.fetchone()[0]
                             
+                            # 寫入 order_items 子表 (單價也轉為標準 float)
                             for item in st.session_state.cart:
                                 cur.execute(
                                     "INSERT INTO order_items (order_id, item_name, size, price) VALUES (%s, %s, %s, %s)",
-                                    (new_order_id, item['item'], item['size'], item['price'])
+                                    (new_order_id, item['item'], item['size'], float(item['price']))
                                 )
                             conn.commit()
                             st.success(f"🎉 訂單已成功建立！訂單編號: #{new_order_id}，總金額: ${total_sum:.2f}。")
