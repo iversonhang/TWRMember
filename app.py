@@ -233,7 +233,7 @@ elif menu == "🛠 管理員後台 (Admin)":
     if admin_password == "admin123":
         tab1, tab2, tab3, tab4 = st.tabs(["🔍 會員管理", "👕 隊衣商品設定", "📈 試堂名單", "📦 訂單與品項領取管理"])
         
-        # --- Tab 1: 會員管理 (支援取消品項與自動退款計算) ---
+        # --- Tab 1: 會員管理 ---
         with tab1:
             st.subheader("搜尋與管理")
             search_query = st.text_input("輸入編號、姓名或電話搜尋:")
@@ -273,7 +273,18 @@ elif menu == "🛠 管理員後台 (Admin)":
                             curr_pay_status = ord_r['pay_status']
                             curr_total = float(ord_r['total_amount'])
                             
-                            with st.expander(f"🛒 訂單 ID #{o_id} | 日期: {ord_r['order_date']} | 金額: ${curr_total} | 付款狀態: {curr_pay_status}"):
+                            # 檢查該訂單是否全部品項皆已領取
+                            df_check_all = run_query("SELECT pickup_status FROM order_items WHERE order_id = %s", (int(o_id),), fetch=True)
+                            is_fully_collected = False
+                            if not df_check_all.empty:
+                                if all(df_check_all['pickup_status'] == 'Collected'):
+                                    is_fully_collected = True
+                            
+                            expander_title = f"🛒 訂單 ID #{o_id} | 日期: {ord_r['order_date']} | 金額: ${curr_total} | 付款狀態: {curr_pay_status}"
+                            if is_fully_collected:
+                                expander_title = f"🟢 [已全部領取] " + expander_title
+                                
+                            with st.expander(expander_title):
                                 df_itms = run_query("SELECT id, item_name, size, price, pickup_status FROM order_items WHERE order_id = %s", (int(o_id),), fetch=True)
                                 
                                 if not df_itms.empty:
@@ -292,24 +303,20 @@ elif menu == "🛠 管理員後台 (Admin)":
                                             st.success("狀態已更新！")
                                             st.rerun()
                                             
-                                        # 取消品項並自動處理退款
                                         if c_col4.button("❌ 取消品項", key=f"m_btn_del_{i_id}"):
-                                            # 1. 刪除該品項
                                             run_query("DELETE FROM order_items WHERE id = %s", (int(i_id),))
                                             
-                                            # 2. 計算新總金額
                                             remaining = run_query("SELECT SUM(price) FROM order_items WHERE order_id = %s", (int(o_id),), fetch=True)
                                             new_total = float(remaining.iloc[0, 0]) if not remaining.empty and remaining.iloc[0, 0] is not None else 0.0
                                             
-                                            # 3. 判斷退款邏輯：如果原本是 Paid，取消品項後標記為 Refunded 或更新金額
                                             if curr_pay_status == "Paid":
                                                 refund_amount = i_price
                                                 if new_total > 0:
                                                     run_query("UPDATE orders SET total_amount = %s, status = 'Partially Refunded' WHERE id = %s", (new_total, int(o_id)))
-                                                    st.warning(f"⚠️ 品項已取消。此訂單原為 Paid，請退還會員金額: **${refund_amount:.2f}** (訂單狀態已更新為 Partially Refunded)")
+                                                    st.warning(f"⚠️ 品項已取消。請退還會員金額: **${refund_amount:.2f}** (已改為 Partially Refunded)")
                                                 else:
                                                     run_query("UPDATE orders SET total_amount = 0, status = 'Refunded' WHERE id = %s", (int(o_id),))
-                                                    st.warning(f"⚠️ 所有品項皆已取消。此訂單需全額退款: **${curr_total:.2f}** (訂單狀態已更新為 Refunded)")
+                                                    st.warning(f"⚠️ 全額退款: **${curr_total:.2f}** (已改為 Refunded)")
                                             else:
                                                 if new_total > 0:
                                                     run_query("UPDATE orders SET total_amount = %s WHERE id = %s", (new_total, int(o_id)))
@@ -356,7 +363,7 @@ elif menu == "🛠 管理員後台 (Admin)":
             if not df_t.empty:
                 st.dataframe(df_t, hide_index=True)
 
-        # --- Tab 4: 訂單與品項領取管理 ---
+        # --- Tab 4: 訂單與品項領取管理 (自動綠色標示全領取訂單) ---
         with tab4:
             st.subheader("📦 訂單總覽與個別商品領取勾選")
             df_orders = run_query("""
@@ -369,7 +376,19 @@ elif menu == "🛠 管理員後台 (Admin)":
             if not df_orders.empty:
                 for _, ord_row in df_orders.iterrows():
                     order_id = ord_row['id']
-                    with st.expander(f"🛒 訂單 #{order_id} | 會員: {ord_row['member_name']} ({ord_row['member_code']}) | 金額: ${ord_row['total_amount']} | 付款: {ord_row['status']} | 日期: {ord_row['order_date']}"):
+                    
+                    # 檢查該訂單是否全部品項皆已領取
+                    df_check_all = run_query("SELECT pickup_status FROM order_items WHERE order_id = %s", (int(order_id),), fetch=True)
+                    is_fully_collected = False
+                    if not df_check_all.empty:
+                        if all(df_check_all['pickup_status'] == 'Collected'):
+                            is_fully_collected = True
+                            
+                    expander_title = f"🛒 訂單 #{order_id} | 會員: {ord_row['member_name']} ({ord_row['member_code']}) | 金額: ${ord_row['total_amount']} | 付款: {ord_row['status']} | 日期: {ord_row['order_date']}"
+                    if is_fully_collected:
+                        expander_title = f"🟢 [已全部領取] " + expander_title
+                        
+                    with st.expander(expander_title):
                         df_items = run_query("SELECT id, item_name, size, price, pickup_status FROM order_items WHERE order_id = %s", (int(order_id),), fetch=True)
                         
                         if not df_items.empty:
@@ -404,4 +423,4 @@ elif menu == "🛠 管理員後台 (Admin)":
             else:
                 st.info("目前尚無任何訂單紀錄。")
     else:
-        st.warning("⚠️ 請在左側欄輸入正確的管理員密碼以解鎖後台 (預設密碼: admin123)。")
+        st.warning("⚠️ 請在左側欄輸入正確的管理員密碼以解鎖後台 (預設測試密碼: admin123)。")
