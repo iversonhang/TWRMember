@@ -233,7 +233,7 @@ elif menu == "🛠 管理員後台 (Admin)":
     if admin_password == "admin123":
         tab1, tab2, tab3, tab4 = st.tabs(["🔍 會員管理", "👕 隊衣商品設定", "📈 試堂名單", "📦 訂單與品項領取管理"])
         
-        # --- Tab 1: 會員管理 (已結合個人訂單紀錄查看) ---
+        # --- Tab 1: 會員管理 ---
         with tab1:
             st.subheader("搜尋與管理")
             search_query = st.text_input("輸入編號、姓名或電話搜尋:")
@@ -260,7 +260,6 @@ elif menu == "🛠 管理員後台 (Admin)":
                     st.divider()
                     st.subheader(f"📦 該會員的歷史訂單紀錄 ({sel_code})")
                     
-                    # 查詢該成員的所有訂單及明細
                     df_member_orders = run_query("""
                         SELECT o.id AS order_id, o.order_date, o.total_amount, o.status AS pay_status,
                                i.item_name, i.size, i.price, i.pickup_status
@@ -340,7 +339,7 @@ elif menu == "🛠 管理員後台 (Admin)":
                                     key=f"item_status_{item_id}"
                                 )
                                 
-                                if c3.button("更新品項", key=f"btn_item_{item_id}")`:`
+                                if c3.button("更新品項", key=f"btn_item_{item_id}"):
                                     run_query("UPDATE order_items SET pickup_status = %s WHERE id = %s", (new_item_pickup, int(item_id)))
                                     st.success(f"品項 #{item_id} 狀態已更新！")
                                     st.rerun()
