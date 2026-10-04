@@ -3,6 +3,11 @@ import psycopg2
 import pandas as pd
 from datetime import date
 import time
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
+import io
 
 st.set_page_config(page_title="欖球會管理系統", layout="wide", page_icon="🏉")
 
@@ -231,7 +236,7 @@ elif menu == "🛠 管理員後台 (Admin)":
     st.title("系統管理後台")
     
     if admin_password == "admin123":
-        tab1, tab2, tab3, tab4 = st.tabs(["🔍 會員管理", "👕 隊衣商品設定", "📈 試堂名單", "📦 訂單與品項領取管理"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔍 會員管理", "👕 隊衣商品設定", "📈 試堂名單", "📦 訂單領取管理", "💾 系統備份到 Gmail"])
         
         # --- Tab 1: 會員管理 ---
         with tab1:
@@ -273,7 +278,6 @@ elif menu == "🛠 管理員後台 (Admin)":
                             curr_pay_status = ord_r['pay_status']
                             curr_total = float(ord_r['total_amount'])
                             
-                            # 檢查該訂單是否全部品項皆已領取
                             df_check_all = run_query("SELECT pickup_status FROM order_items WHERE order_id = %s", (int(o_id),), fetch=True)
                             is_fully_collected = False
                             if not df_check_all.empty:
@@ -313,10 +317,10 @@ elif menu == "🛠 管理員後台 (Admin)":
                                                 refund_amount = i_price
                                                 if new_total > 0:
                                                     run_query("UPDATE orders SET total_amount = %s, status = 'Partially Refunded' WHERE id = %s", (new_total, int(o_id)))
-                                                    st.warning(f"⚠️ 品項已取消。請退還會員金額: **${refund_amount:.2f}** (已改為 Partially Refunded)")
+                                                    st.warning(f"⚠️ 品項已取消。請退還會員金額: **${refund_amount:.2f}**")
                                                 else:
                                                     run_query("UPDATE orders SET total_amount = 0, status = 'Refunded' WHERE id = %s", (int(o_id),))
-                                                    st.warning(f"⚠️ 全額退款: **${curr_total:.2f}** (已改為 Refunded)")
+                                                    st.warning(f"⚠️ 全額退款: **${curr_total:.2f}**")
                                             else:
                                                 if new_total > 0:
                                                     run_query("UPDATE orders SET total_amount = %s WHERE id = %s", (new_total, int(o_id)))
@@ -339,22 +343,59 @@ elif menu == "🛠 管理員後台 (Admin)":
             if not df_all_m.empty:
                 st.dataframe(df_all_m, hide_index=True)
 
-        # --- Tab 2: 商品設定 ---
+        # --- Tab 2: 商品設定與編輯管理 (完整新增 Edit 功能) ---
         with tab2:
             st.subheader("👕 隊衣商品與庫存預先定義")
+            
             with st.form("add_prod"):
+                st.write("➕ 新增商品")
                 n_name = st.text_input("商品名稱")
                 n_price = st.number_input("價格", min_value=0.0)
-                n_sizes = st.text_input("尺寸 (逗號分隔)")
+                n_sizes = st.text_input("尺寸 (逗號分隔，例如: XS, S, M, L, XL)")
                 n_vis = st.checkbox("公開上架", value=True)
-                if st.form_submit_button("新增"):
-                    run_query("INSERT INTO products (item_name, price, sizes, is_visible) VALUES (%s, %s, %s, %s)", (n_name, n_price, n_sizes, n_vis))
-                    st.success("新增成功！")
-                    st.rerun()
+                if st.form_submit_button("新增商品"):
+                    if n_name and n_sizes:
+                        run_query("INSERT INTO products (item_name, price, sizes, is_visible) VALUES (%s, %s, %s, %s)", (n_name, n_price, n_sizes, n_vis))
+                        st.success(f"✅ 成功新增商品: {n_name}")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.warning("⚠️️ 請填寫商品名稱與尺寸。")
+            
             st.divider()
-            df_p = run_query("SELECT * FROM products", fetch=True)
+            st.subheader("📋 現有商品管理與編輯/刪除")
+            
+            df_p = run_query("SELECT * FROM products ORDER BY id DESC", fetch=True)
             if not df_p.empty:
-                st.dataframe(df_p, hide_index=True)
+                for _, p_row in df_p.iterrows():
+                    p_id = p_row['id']
+                    p_name = p_row['item_name']
+                    
+                    with st.expander(f"📦 商品: {p_name} | 價格: ${p_row['price']} | 上架: {'是' if p_row['is_visible'] else '否'}"):
+                        with st.form(f"edit_prod_{p_id}"):
+                            edit_name = st.text_input("修改商品名稱", value=p_name)
+                            edit_price = st.number_input("修改價格", value=float(p_row['price']), min_value=0.0)
+                            edit_sizes = st.text_input("修改尺寸", value=p_row['sizes'])
+                            edit_vis = st.checkbox("公開上架 (Visible)", value=bool(p_row['is_visible']))
+                            
+                            col_e1, col_e2 = st.columns(2)
+                            with col_e1:
+                                if st.form_submit_button("💾 儲存修改"):
+                                    run_query(
+                                        "UPDATE products SET item_name = %s, price = %s, sizes = %s, is_visible = %s WHERE id = %s",
+                                        (edit_name, edit_price, edit_sizes, edit_vis, int(p_id))
+                                    )
+                                    st.success("✅ 商品資料更新成功！")
+                                    time.sleep(1)
+                                    st.rerun()
+                            with col_e2:
+                                if st.form_submit_button("🗑️️ 刪除此商品"):
+                                    run_query("DELETE FROM products WHERE id = %s", (int(p_id),))
+                                    st.success(f"🗑️ 商品 {p_name} 已刪除！")
+                                    time.sleep(1)
+                                    st.rerun()
+            else:
+                st.info("目前尚無任何預定義商品。")
 
         # --- Tab 3: 試堂名單 ---
         with tab3:
@@ -363,7 +404,7 @@ elif menu == "🛠 管理員後台 (Admin)":
             if not df_t.empty:
                 st.dataframe(df_t, hide_index=True)
 
-        # --- Tab 4: 訂單與品項領取管理 (自動綠色標示全領取訂單) ---
+        # --- Tab 4: 訂單與品項領取管理 ---
         with tab4:
             st.subheader("📦 訂單總覽與個別商品領取勾選")
             df_orders = run_query("""
@@ -377,7 +418,6 @@ elif menu == "🛠 管理員後台 (Admin)":
                 for _, ord_row in df_orders.iterrows():
                     order_id = ord_row['id']
                     
-                    # 檢查該訂單是否全部品項皆已領取
                     df_check_all = run_query("SELECT pickup_status FROM order_items WHERE order_id = %s", (int(order_id),), fetch=True)
                     is_fully_collected = False
                     if not df_check_all.empty:
@@ -422,5 +462,49 @@ elif menu == "🛠 管理員後台 (Admin)":
                                 st.rerun()
             else:
                 st.info("目前尚無任何訂單紀錄。")
+
+        # --- Tab 5: 系統備份到 Gmail ---
+        with tab5:
+            st.subheader("💾 資料庫完整備份與郵件傳送")
+            st.write("點擊下方按鈕，系統將自動匯出所有資料庫表格並透過 Gmail 傳送備份 CSV 檔案到你的信箱。")
+            
+            if st.button("🚀 立即執行備份並寄送至 Gmail"):
+                try:
+                    df_m_bk = run_query("SELECT * FROM members", fetch=True)
+                    df_o_bk = run_query("SELECT * FROM orders", fetch=True)
+                    df_oi_bk = run_query("SELECT * FROM order_items", fetch=True)
+                    df_p_bk = run_query("SELECT * FROM products", fetch=True)
+                    
+                    sender = st.secrets["MAIL_SENDER"]
+                    password = st.secrets["MAIL_PASSWORD"]
+                    receiver = st.secrets["MAIL_RECEIVER"]
+                    
+                    msg = MIMEMultipart()
+                    msg['From'] = sender
+                    msg['To'] = receiver
+                    msg['Subject'] = f"🏉 欖球會系統資料庫備份 - {date.today()}"
+                    
+                    body = f"這是 欖球會管理系統 於 {date.today()} 自動產生的資料庫備份檔，請妥善保存。"
+                    msg.attach(MIMEText(body, 'plain', 'utf-8'))
+                    
+                    for table_name, df_data in [("members", df_m_bk), ("orders", df_o_bk), ("order_items", df_oi_bk), ("products", df_p_bk)]:
+                        csv_buffer = io.StringIO()
+                        df_data.to_csv(csv_buffer, index=False)
+                        csv_bytes = csv_buffer.getvalue().encode('utf-8')
+                        
+                        att = MIMEApplication(csv_bytes, _subtype="csv")
+                        att.add_header('Content-Disposition', 'attachment', filename=f"{table_name}_backup_{date.today()}.csv")
+                        msg.attach(att)
+                    
+                    server = smtplib.SMTP("smtp.gmail.com", 587)
+                    server.starttls()
+                    server.login(sender, password)
+                    server.sendmail(sender, receiver, msg.as_string())
+                    server.quit()
+                    
+                    st.success(f"✅ 備份成功！資料庫各表格已成功寄送至 **{receiver}**。")
+                    
+                except Exception as e:
+                    st.error(f"❌ 備份寄送失敗，請檢查 Gmail 密碼或 Secrets 設定是否正確。錯誤訊息: {e}")
     else:
-        st.warning("⚠️ 請在左側欄輸入正確的管理員密碼以解鎖後台 (預設測試密碼: admin123)。")
+        st.warning("⚠️ 請在左側欄輸入正確的管理員密碼以解鎖後台 (預設密碼: admin123)。")
