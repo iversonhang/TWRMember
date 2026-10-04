@@ -185,7 +185,6 @@ elif menu == "👕 買隊衣 (會員購物車)":
             df_cart = pd.DataFrame(st.session_state.cart)
             st.dataframe(df_cart, hide_index=True)
             
-            # 強制轉換總金額為標準 float，避免 np.float64 型態錯誤
             total_sum = float(df_cart['price'].sum())
             st.markdown(f"### 💰 總金額: **${total_sum:.2f}**")
             
@@ -200,14 +199,12 @@ elif menu == "👕 買隊衣 (會員購物車)":
                         conn = get_connection()
                         cur = conn.cursor()
                         try:
-                            # 寫入 orders 主表 (強制轉為標準 float)
                             cur.execute(
                                 "INSERT INTO orders (member_code, total_amount) VALUES (%s, %s) RETURNING id",
                                 (selected_member_code, total_sum)
                             )
                             new_order_id = cur.fetchone()[0]
                             
-                            # 寫入 order_items 子表 (單價也轉為標準 float)
                             for item in st.session_state.cart:
                                 cur.execute(
                                     "INSERT INTO order_items (order_id, item_name, size, price) VALUES (%s, %s, %s, %s)",
@@ -236,7 +233,7 @@ elif menu == "🛠 管理員後台 (Admin)":
     if admin_password == "admin123":
         tab1, tab2, tab3, tab4 = st.tabs(["🔍 會員管理", "👕 隊衣商品設定", "📈 試堂名單", "📦 訂單與品項領取管理"])
         
-        # --- Tab 1: 會員管理 ---
+        # --- Tab 1: 會員管理 (已結合個人訂單紀錄查看) ---
         with tab1:
             st.subheader("搜尋與管理")
             search_query = st.text_input("輸入編號、姓名或電話搜尋:")
@@ -259,8 +256,29 @@ elif menu == "🛠 管理員後台 (Admin)":
                                 run_query("UPDATE orders SET member_code = %s WHERE member_code = %s", (new_code, t_row['member_code']))
                             st.success("更新成功！")
                             st.rerun()
+                            
+                    st.divider()
+                    st.subheader(f"📦 該會員的歷史訂單紀錄 ({sel_code})")
+                    
+                    # 查詢該成員的所有訂單及明細
+                    df_member_orders = run_query("""
+                        SELECT o.id AS order_id, o.order_date, o.total_amount, o.status AS pay_status,
+                               i.item_name, i.size, i.price, i.pickup_status
+                        FROM orders o
+                        LEFT JOIN order_items i ON o.id = i.order_id
+                        WHERE o.member_code = %s
+                        ORDER BY o.order_date DESC
+                    """, (sel_code,), fetch=True)
+                    
+                    if not df_member_orders.empty:
+                        st.dataframe(df_member_orders, hide_index=True)
+                    else:
+                        st.info("此會員目前尚無任何購物訂單紀錄。")
+                        
                 else:
                     st.warning("找不到此人。")
+                    
+            st.divider()
             st.write("📋 所有會員總表")
             df_all_m = run_query("SELECT * FROM members ORDER BY id DESC", fetch=True)
             if not df_all_m.empty:
@@ -322,7 +340,7 @@ elif menu == "🛠 管理員後台 (Admin)":
                                     key=f"item_status_{item_id}"
                                 )
                                 
-                                if c3.button("更新品項", key=f"btn_item_{item_id}"):
+                                if c3.button("更新品項", key=f"btn_item_{item_id}")`:`
                                     run_query("UPDATE order_items SET pickup_status = %s WHERE id = %s", (new_item_pickup, int(item_id)))
                                     st.success(f"品項 #{item_id} 狀態已更新！")
                                     st.rerun()
