@@ -3,6 +3,7 @@ import psycopg2
 import pandas as pd
 from datetime import date
 import uuid
+import time
 
 st.set_page_config(page_title="欖球會管理系統", layout="wide", page_icon="🏉")
 
@@ -14,7 +15,7 @@ def get_connection():
     return psycopg2.connect(st.secrets["DB_URL"])
 
 def run_query(query, params=None, fetch=False):
-    """執行 SQL 語法，支援讀取與寫入"""
+    """執行 SQL 語法，支援讀取與寫入，並加入防呆機制"""
     conn = get_connection()
     cursor = conn.cursor()
     try:
@@ -35,16 +36,16 @@ def run_query(query, params=None, fetch=False):
         conn.close()
 
 def init_db():
-    """初始化資料表，現在所有人員都在 members 表中"""
+    """初始化資料表，所有人員都在 members 表中"""
     create_tables_sql = """
     CREATE TABLE IF NOT EXISTS members (
         id SERIAL PRIMARY KEY,
         member_code VARCHAR(50) UNIQUE,
         name VARCHAR(100),
         phone VARCHAR(20),
-        status VARCHAR(20) DEFAULT 'Trial', -- 預設為試堂 (Trial)
-        trial_date DATE,                   -- 試堂日期
-        join_date DATE                     -- 轉為正式會員的日期
+        status VARCHAR(20) DEFAULT 'Trial',
+        trial_date DATE,
+        join_date DATE
     );
     CREATE TABLE IF NOT EXISTS orders (
         id SERIAL PRIMARY KEY,
@@ -60,8 +61,8 @@ def init_db():
 # 執行初始化
 init_db()
 
-# 生成隨機短編號的輔助函數 (例如 T-1A2B)
-def generate_short_code(prefix="T"):
+# 生成隨機短編號的輔助函數 (例如 TRIAL-1A2B)
+def generate_short_code(prefix="TRIAL"):
     return f"{prefix}-{str(uuid.uuid4())[:4].upper()}"
 
 # ==========================================
@@ -71,7 +72,7 @@ st.sidebar.title("🏉 欖球會系統")
 menu = st.sidebar.radio("選擇功能", ["📝 報名試堂 (公眾)", "👕 買隊衣 (會員)", "🛠️ 管理員後台 (Admin)"])
 
 # ==========================================
-# 3. 功能模組：報名試堂 (直接進入 members 表)
+# 3. 功能模組：報名試堂
 # ==========================================
 if menu == "📝 報名試堂 (公眾)":
     st.title("報名欖球試堂")
@@ -88,7 +89,7 @@ if menu == "📝 報名試堂 (公眾)":
                 # 為試堂自動生成一個臨時編號
                 temp_code = generate_short_code("TRIAL")
                 
-                # 直接寫入 members 表，狀態預設為 Trial
+                # 寫入 members 表，狀態為 Trial，並記錄 trial_date
                 run_query(
                     "INSERT INTO members (member_code, name, phone, status, trial_date) VALUES (%s, %s, %s, 'Trial', %s)", 
                     (temp_code, name, phone, trial_date)
@@ -118,7 +119,6 @@ elif menu == "👕 買隊衣 (會員)":
     with col1:
         if st.button("搜尋"):
             if search_input:
-                # 同時搜尋 member_code (完全符合) 或 phone (完全符合或包含)
                 search_sql = "SELECT id, member_code, name, phone, status FROM members WHERE member_code = %s OR phone = %s"
                 result = run_query(search_sql, (search_input, search_input), fetch=True)
                 
@@ -141,16 +141,13 @@ elif menu == "👕 買隊衣 (會員)":
         with st.form("order_form"):
             st.subheader("填寫訂單")
             
-            # 準備下拉選單的選項 (顯示 姓名 + 編號)
             member_options = []
             for index, row in st.session_state.found_members.iterrows():
                 member_options.append(f"{row['name']} ({row['member_code']})")
             
-            # 如果有多個成員（例如同一個電話有多個小朋友），讓用戶選擇
             selected_member_str = st.selectbox("選擇要購買隊衣的學員", member_options)
             
-            # 從選擇的字串中提取 member_code
-            # 格式是 "Name (MEMBER_CODE)"，所以我們取括號內的內容
+            # 從字串 "Name (MEMBER_CODE)" 提取編號
             selected_member_code = selected_member_str.split("(")[-1].replace(")", "")
             
             item = st.selectbox("選擇商品", ["2026 主場球衣", "2026 作客球衣", "訓練短褲"])
@@ -159,21 +156,19 @@ elif menu == "👕 買隊衣 (會員)":
             submitted = st.form_submit_button("確認下單")
             
             if submitted:
-                # 寫入訂單，使用剛剛提取出來的確切 member_code
                 run_query(
                     "INSERT INTO orders (member_code, item, size) VALUES (%s, %s, %s)",
                     (selected_member_code, item, size)
                 )
                 st.success(f"✅ 訂單已收到！({selected_member_str}) 的 {item} ({size}) 訂購成功，請聯絡教練付款。")
                 
-                # 訂購完成後提供按鈕可以重新整理/清空畫面
                 if st.button("完成並返回"):
                     st.session_state.found_members = pd.DataFrame()
                     st.session_state.search_term = ""
                     st.rerun()
 
 # ==========================================
-# 5. 功能模組：管理員後台
+# 5. 功能模組：管理員後台 (無縫轉移會籍與同步訂單)
 # ==========================================
 elif menu == "🛠️ 管理員後台 (Admin)":
     st.title("系統管理後台")
@@ -186,11 +181,11 @@ elif menu == "🛠️ 管理員後台 (Admin)":
         # --- Tab 1: 會員管理 (更新狀態) ---
         with tab1:
             st.subheader("搜尋與管理")
-            search_query = st.text_input("輸入編號或姓名搜尋:")
+            search_query = st.text_input("輸入編號、姓名或電話搜尋:")
             
             if search_query:
-                search_sql = "SELECT * FROM members WHERE member_code ILIKE %s OR name ILIKE %s"
-                df_members = run_query(search_sql, (f"%{search_query}%", f"%{search_query}%"), fetch=True)
+                search_sql = "SELECT * FROM members WHERE member_code ILIKE %s OR name ILIKE %s OR phone = %s"
+                df_members = run_query(search_sql, (f"%{search_query}%", f"%{search_query}%", search_query), fetch=True)
                 
                 if not df_members.empty:
                     st.dataframe(df_members, hide_index=True)
@@ -198,50 +193,76 @@ elif menu == "🛠️ 管理員後台 (Admin)":
                     member_id = df_members.iloc[0]['id']
                     current_status = df_members.iloc[0]['status']
                     current_code = df_members.iloc[0]['member_code']
+                    trial_date_val = df_members.iloc[0]['trial_date']
+                    join_date_val = df_members.iloc[0]['join_date']
                     
                     with st.form("update_member"):
-                        st.write(f"正在管理: **{df_members.iloc[0]['name']}** ({current_code})")
+                        st.write(f"### 正在管理: **{df_members.iloc[0]['name']}**")
+                        
+                        # 顯示時間紀錄
+                        time_col1, time_col2 = st.columns(2)
+                        time_col1.info(f"📅 報名試堂日: {trial_date_val if pd.notna(trial_date_val) else '無紀錄'}")
+                        time_col2.success(f"🎉 正式入會日: {join_date_val if pd.notna(join_date_val) else '尚未入會'}")
+                        
+                        st.divider()
                         
                         col1, col2 = st.columns(2)
                         with col1:
-                            # 更新狀態，包含 Trial 和 Active
                             status_options = ["Trial", "Active", "Expired"]
                             new_status = st.selectbox(
-                                "更改狀態 (繳費後請轉為 Active)", 
+                                "更改狀態 (繳費後轉為 Active)", 
                                 status_options, 
                                 index=status_options.index(current_status) if current_status in status_options else 0
                             )
                         
                         with col2:
-                            # 允許管理員修改編號 (例如將 TRIAL-1234 改為正式的 R001)
-                            new_code = st.text_input("更新會員編號 (選填)", value=current_code)
+                            # 智慧判斷：如果準備轉為 Active，且原本是 TRIAL 開頭，自動建議一組 TWR 編號
+                            suggested_code = current_code
+                            if new_status == "Active" and current_status == "Trial" and current_code.startswith("TRIAL"):
+                                import random
+                                suggested_code = f"TWR{random.randint(10000, 99999)}"
+                                
+                            new_code = st.text_input("會員編號 (轉正式會員請設為 TWR 開頭)", value=suggested_code)
                             
                         if st.form_submit_button("確認更新"):
-                            # 如果狀態變成 Active 且之前不是，記錄 join_date
-                            join_date_sql = ""
-                            if new_status == "Active" and current_status != "Active":
-                                join_date_sql = ", join_date = CURRENT_DATE"
-                                
                             try:
-                                run_query(
-                                    f"UPDATE members SET status = %s, member_code = %s {join_date_sql} WHERE id = %s", 
-                                    (new_status, new_code, int(member_id))
-                                )
-                                st.success("✅ 資料更新成功！")
+                                # 1. 判斷是否需要寫入正式入會日期 (join_date)
+                                join_date_sql = ""
+                                if new_status == "Active" and current_status != "Active" and pd.isna(join_date_val):
+                                    join_date_sql = ", join_date = CURRENT_DATE"
+                                    
+                                # 2. 更新 members 資料表
+                                update_sql = f"UPDATE members SET status = %s, member_code = %s {join_date_sql} WHERE id = %s"
+                                run_query(update_sql, (new_status, new_code, int(member_id)))
+                                
+                                # 3. 同步更新 orders 資料表
+                                if current_code != new_code:
+                                    run_query(
+                                        "UPDATE orders SET member_code = %s WHERE member_code = %s", 
+                                        (new_code, current_code)
+                                    )
+                                    
+                                st.success("✅ 會員資料更新成功！")
+                                if current_code != new_code:
+                                    st.info(f"🔄 編號已從 {current_code} 變更為 {new_code}，該學員的歷史訂單已自動同步。")
+                                
+                                time.sleep(1.5)
                                 st.rerun()
+                                
                             except Exception as e:
-                                st.error("❌ 更新失敗，可能是會員編號與其他人重複。")
+                                st.error("❌ 更新失敗，可能是新設定的會員編號與其他人重複。")
                 else:
                     st.warning("找不到此人。")
                     
             st.divider()
             st.write("📋 所有人名單 (包含試堂與正式會員)")
-            st.dataframe(run_query("SELECT * FROM members ORDER BY id DESC", fetch=True), hide_index=True)
+            df_all = run_query("SELECT * FROM members ORDER BY id DESC", fetch=True)
+            if not df_all.empty:
+                st.dataframe(df_all, hide_index=True)
             
         # --- Tab 2: 試堂專屬視角 ---
         with tab2:
             st.subheader("即將到來的試堂")
-            # 只顯示狀態為 Trial 的人
             df_trials = run_query("SELECT member_code, name, phone, trial_date FROM members WHERE status = 'Trial' ORDER BY trial_date ASC", fetch=True)
             if not df_trials.empty:
                 st.dataframe(df_trials, hide_index=True)
@@ -252,7 +273,8 @@ elif menu == "🛠️ 管理員後台 (Admin)":
         with tab3:
             st.subheader("隊衣訂購紀錄")
             df_orders = run_query("SELECT * FROM orders ORDER BY order_date DESC", fetch=True)
-            st.dataframe(df_orders, hide_index=True)
+            if not df_orders.empty:
+                st.dataframe(df_orders, hide_index=True)
             
             with st.form("update_order"):
                 order_id = st.number_input("輸入訂單 ID (id) 以更新狀態", min_value=1, step=1)
