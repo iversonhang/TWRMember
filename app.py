@@ -57,7 +57,7 @@ def init_db():
 init_db()
 
 # ==========================================
-# 2. 自動生成編號邏輯 (核心更新)
+# 2. 自動生成編號邏輯
 # ==========================================
 def get_next_trial_code():
     """尋找最小可用的 TRIAL 編號 (Reuse 機制)"""
@@ -67,7 +67,6 @@ def get_next_trial_code():
     if df.empty:
         return "TRIAL-0001"
     
-    # 取出所有現有的 Trial 數字
     existing_nums = []
     for code in df['member_code']:
         try:
@@ -78,7 +77,6 @@ def get_next_trial_code():
             
     existing_nums.sort()
     
-    # 從 1 開始找，遇到空缺就立刻補上
     target = 1
     for num in existing_nums:
         if num == target:
@@ -89,7 +87,7 @@ def get_next_trial_code():
     return f"TRIAL-{target:04d}"
 
 def get_next_twr_code():
-    """尋找最大的 TWR 編號並 +1 (不重複, 由 00001 開始)"""
+    """尋找最大的 TWR 編號並 +1 (由 00001 開始)"""
     query = "SELECT member_code FROM members WHERE member_code LIKE 'TWR%'"
     df = run_query(query, fetch=True)
     
@@ -99,7 +97,6 @@ def get_next_twr_code():
     max_num = 0
     for code in df['member_code']:
         try:
-            # 移除 'TWR' 字首並轉換為整數
             num = int(code.replace('TWR', ''))
             if num > max_num:
                 max_num = num
@@ -130,7 +127,6 @@ if menu == "📝 報名試堂 (公眾)":
         submitted = st.form_submit_button("提交報名")
         if submitted:
             if name and phone:
-                # 取得下一個可用的重用/新 TRIAL 編號
                 temp_code = get_next_trial_code()
                 
                 run_query(
@@ -226,16 +222,28 @@ elif menu == "🛠️ 管理員後台 (Admin)":
                 df_members = run_query(search_sql, (f"%{search_query}%", f"%{search_query}%", search_query), fetch=True)
                 
                 if not df_members.empty:
+                    st.success(f"🔍 找到 {len(df_members)} 筆符合的紀錄，請在下方選擇欲編輯的成員：")
                     st.dataframe(df_members, hide_index=True)
                     
-                    member_id = df_members.iloc[0]['id']
-                    current_status = df_members.iloc[0]['status']
-                    current_code = df_members.iloc[0]['member_code']
-                    trial_date_val = df_members.iloc[0]['trial_date']
-                    join_date_val = df_members.iloc[0]['join_date']
+                    st.divider()
+                    
+                    options = []
+                    for _, r in df_members.iterrows():
+                        options.append(f"{r['name']} ({r['member_code']}) - 電話: {r['phone']}")
+                    
+                    selected_option = st.selectbox("🎯 選擇要編輯的成員", options)
+                    selected_code = selected_option.split("(")[-1].split(")")[0]
+                    
+                    target_row = df_members[df_members['member_code'] == selected_code].iloc[0]
+                    
+                    member_id = target_row['id']
+                    current_status = target_row['status']
+                    current_code = target_row['member_code']
+                    trial_date_val = target_row['trial_date']
+                    join_date_val = target_row['join_date']
                     
                     with st.form("update_member"):
-                        st.write(f"### 正在管理: **{df_members.iloc[0]['name']}**")
+                        st.markdown(f"### ✏️ 正在編輯: **{target_row['name']}**")
                         
                         time_col1, time_col2 = st.columns(2)
                         time_col1.info(f"📅 報名試堂日: {trial_date_val if pd.notna(trial_date_val) else '無紀錄'}")
@@ -253,14 +261,13 @@ elif menu == "🛠️ 管理員後台 (Admin)":
                             )
                         
                         with col2:
-                            # 智慧判斷：如果準備轉為 Active，且原本是 TRIAL 開頭，自動抓取下一組 TWR 順序號碼
                             suggested_code = current_code
                             if new_status == "Active" and current_status == "Trial" and current_code.startswith("TRIAL"):
                                 suggested_code = get_next_twr_code()
                                 
                             new_code = st.text_input("會員編號 (轉正式會員請設為 TWR 開頭)", value=suggested_code)
                             
-                        if st.form_submit_button("確認更新"):
+                        if st.form_submit_button("💾 確認更新資料"):
                             try:
                                 join_date_sql = ""
                                 if new_status == "Active" and current_status != "Active" and pd.isna(join_date_val):
@@ -275,20 +282,20 @@ elif menu == "🛠️ 管理員後台 (Admin)":
                                         (new_code, current_code)
                                     )
                                     
-                                st.success("✅ 會員資料更新成功！")
+                                st.success(f"✅ 會員 {target_row['name']} 資料更新成功！")
                                 if current_code != new_code:
-                                    st.info(f"🔄 編號已從 {current_code} 變更為 {new_code}，該學員的歷史訂單已自動同步。 (原 {current_code} 已釋出)")
+                                    st.info(f"🔄 編號已從 {current_code} 變更為 {new_code}，歷史訂單已自動同步。 (原 {current_code} 已釋出供 Reuse)")
                                 
                                 time.sleep(1.5)
                                 st.rerun()
                                 
                             except Exception as e:
-                                st.error("❌ 更新失敗，可能是新設定的會員編號與其他人重複。")
+                                st.error(f"❌ 更新失敗：{e}")
                 else:
                     st.warning("找不到此人。")
                     
             st.divider()
-            st.write("📋 所有人名單")
+            st.write("📋 系統所有會員總表")
             df_all = run_query("SELECT * FROM members ORDER BY id DESC", fetch=True)
             if not df_all.empty:
                 st.dataframe(df_all, hide_index=True)
